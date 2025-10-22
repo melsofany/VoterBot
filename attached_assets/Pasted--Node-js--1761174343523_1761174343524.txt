@@ -1,0 +1,282 @@
+تمام — هعمللك حل عملي وجاهز تقدر تنفذه على سيرفر Node.js: بوت تيليجرام مخصّص للمناديب، بيقبل صور بطاقات الناخبين، يعمل OCR، يفَرّغ البيانات في Google Sheets، يرفع صورة البطاقة على Google Drive باسم الرقم القومي، يطلب مشاركة الموقع، ويتأكد من رقم التليفون (11 رقم ويبدأ بـ 01) وبعدين يقدّم أزرار: مؤيد / معارض / محايد. تحت هتلاقي:
+	1.	لمحة عن البنية (architecture) والأذونات المطلوبة (باختصار).  ￼
+	2.	كود Node.js عملي (Telegraf) يطبق المطلوب (مع تعليقات توضيحية).
+	3.	خطوات الاعداد السريعة (Google Service Account، تفعيل APIs، متطلبات بيئة).  ￼
+	4.	ملاحظات أمان وخصوصية وقانونية مهمة.
+
+خلّيه عربي وبسطر واحد: هتحتاج حساب Google (Service Account) مع صلاحيات Drive + Sheets + Vision، وتوكن بوت تيليجرام، وسيرفر Node.js.
+
+⸻
+
+1) بنية الحل (بالمختصر)
+	•	Telegram bot (Telegraf) يستقبل الصور والردود من المندوبين.  ￼
+	•	بعد استقبال صورة البطاقة: نحمل الصورة من Telegram، نمررها لـ Google Cloud Vision OCR لاستخراج النص.  ￼
+	•	نحلل النص لاستخراج الحقول: الاسم/اللقب/الرقم القومي/تاريخ الميلاد (حسب شكل البطاقة) — نستخدم تعابير منتظمة (regex) لتخمين الرقم القومي.
+	•	نرفع الصورة إلى Google Drive باسم NNNNNNNNNNN.jpg حيث N.. هو الرقم القومي. (Drive API).  ￼
+	•	نكتب سجل جديد (صف) في Google Sheets يحتوي على الحقول + رابط ملف Drive + إحداثيات الموقع + حالة التصويت.  ￼
+
+⸻
+
+2) كود جاهز (Node.js + Telegraf)
+
+انسخ الكود ده على مشروع Node.js، ثبت الحزم المطلوبة (npm i telegraf axios googleapis @google-cloud/vision dotenv).
+
+// index.js
+require('dotenv').config();
+const fs = require('fs');
+const {Telegraf, Markup} = require('telegraf');
+const axios = require('axios');
+const {google} = require('googleapis');
+const vision = require('@google-cloud/vision');
+
+// ENV required:
+// BOT_TOKEN, ALLOWED_USER_IDS (comma separated), GOOGLE_APPLICATION_CREDENTIALS (path to service account json),
+// SPREADSHEET_ID, DRIVE_FOLDER_ID (optional)
+
+const bot = new Telegraf(process.env.BOT_TOKEN);
+const allowed = (process.env.ALLOWED_USER_IDS||'').split(',').map(s=>s.trim()).filter(Boolean);
+const sheetsClient = new google.auth.GoogleAuth({
+  keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS,
+  scopes: ['https://www.googleapis.com/auth/spreadsheets','https://www.googleapis.com/auth/drive']
+});
+const visionClient = new vision.ImageAnnotatorClient({keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS});
+
+async function appendRow(values){
+  const auth = await sheetsClient.getClient();
+  const sheets = google.sheets({version:'v4', auth});
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: 'Sheet1!A1',
+    valueInputOption: 'RAW',
+    requestBody: { values: [values] }
+  });
+}
+
+async function uploadToDrive(buffer, filename, mimeType='image/jpeg'){
+  const auth = await sheetsClient.getClient();
+  const drive = google.drive({version:'v3', auth});
+  const res = await drive.files.create({
+    requestBody: {
+      name: filename,
+      parents: process.env.DRIVE_FOLDER_ID ? [process.env.DRIVE_FOLDER_ID] : undefined
+    },
+    media: {
+      mimeType,
+      body: buffer
+    },
+    fields: 'id,webViewLink'
+  });
+  return res.data; // {id, webViewLink}
+}
+
+// middleware: allow only authorized user ids
+bot.use(async (ctx, next) => {
+  // get telegram user id
+  const uid = ctx.from && ctx.from.id ? String(ctx.from.id) : null;
+  if(!uid || !allowed.includes(uid)){
+    try {
+      await ctx.reply('مش مسموح بالدخول. تواصل مع المسؤول لاضافة الUserID بتاعك.');
+    } catch(e){}
+    return;
+  }
+  return next();
+});
+
+bot.start(async (ctx) => {
+  await ctx.reply('أهلاً — ابعت صورة بطاقة الناخب دلوقتي (صورة واضحة من فضلك).');
+});
+
+// استقبال صورة البطاقة
+bot.on('photo', async (ctx) => {
+  try {
+    await ctx.reply('استلمت الصورة. شغالين على استخراج البيانات...');
+
+    // ناخد أعلى جودة صورة
+    const photos = ctx.message.photo;
+    const best = photos[photos.length-1];
+    const fileId = best.file_id;
+
+    // نحصل على رابط الملف و نحمله
+    const url = await ctx.telegram.getFileLink(fileId);
+    const resp = await axios.get(url.href, { responseType: 'arraybuffer' });
+    const buffer = Buffer.from(resp.data);
+
+    // نعمل OCR باستخدام Cloud Vision
+    const [result] = await visionClient.textDetection({image: {content: buffer}});
+    const detections = result.textAnnotations || [];
+    const fullText = detections.length ? detections[0].description : '';
+
+    // حاول نستخرج الرقم القومي (مثال: تقريبا 14 رقم أو 11 حسب بلدك — عدّل regex لو لازم)
+    // هنا نفترض الرقم القومي المصري: 14 رقم (مثال) — لو بطاقتك شكل مختلف عدّلها
+    const nidMatch = fullText.match(/\b(\d{14}|\d{11})\b/);
+    const nationalId = nidMatch ? nidMatch[0] : '';
+
+    // ارفع الصورة على Drive بالاسم الرقم القومي.jpg أو timestamp لو مفيش رقم
+    const filename = nationalId ? `${nationalId}.jpg` : `card_${Date.now()}.jpg`;
+    // uploadToDrive expects a stream or buffer as body; google-api accepts stream - we pass buffer via stream
+    const stream = require('stream');
+    const readStream = new stream.PassThrough();
+    readStream.end(buffer);
+    const driveRes = await uploadToDrive(readStream, filename, 'image/jpeg');
+
+    // خزّن بعض الحقول مؤقتًا في الجلسة
+    ctx.session = ctx.session || {};
+    ctx.session.pending = {
+      nationalId,
+      driveFileId: driveRes.id,
+      driveLink: driveRes.webViewLink,
+      ocrText: fullText
+    };
+
+    // اسأل المندوب يشارك الموقع
+    await ctx.reply('تم رفع الصورة. اضغط رفع الموقع (شارك الموقع) عشان نسجل موقع الناخب.', Markup.keyboard([
+      Markup.button.locationRequest('أرسل موقعي')
+    ]).oneTime().resize());
+
+  } catch (err) {
+    console.error(err);
+    await ctx.reply('حصل خطأ أثناء معالجة الصورة. حاول تاني أو ابعت صورة أوضح.');
+  }
+});
+
+// استقبال الموقع المشارك
+bot.on('location', async (ctx) => {
+  try {
+    const lat = ctx.message.location.latitude;
+    const lon = ctx.message.location.longitude;
+    ctx.session = ctx.session || {};
+    const pending = ctx.session.pending || {};
+    pending.location = {lat, lon};
+
+    // بعد الموقع نطلب اسم العائلة
+    await ctx.reply('اكتب اسم العائلة (القبيلة / العيلة):', Markup.removeKeyboard());
+    // set stage
+    ctx.session.stage = 'await_family';
+  } catch (e) {
+    console.error(e);
+    await ctx.reply('مفيش موقع وصل. تأكد إنك ضغطت "مشاركة الموقع".');
+  }
+});
+
+// استقبال نصوص بناء على ستيج
+bot.on('text', async (ctx) => {
+  ctx.session = ctx.session || {};
+  const stage = ctx.session.stage;
+
+  if(stage === 'await_family'){
+    ctx.session.pending = ctx.session.pending || {};
+    ctx.session.pending.family = ctx.message.text.trim();
+    ctx.session.stage = 'await_phone';
+    await ctx.reply('دلوقتي اكتب رقم التليفون (11 رقم ويبدأ بـ 01):');
+    return;
+  }
+
+  if(stage === 'await_phone'){
+    const phone = ctx.message.text.replace(/\D/g,'');
+    if(!/^(01)\d{9}$/.test(phone)){
+      await ctx.reply('رقم ملوش شكل صحيح. لازم 11 رقم ويبدأ بـ 01. اكتب الرقم تاني:');
+      return;
+    }
+    ctx.session.pending.phone = phone;
+
+    // نسأل حالة التأييد
+    ctx.session.stage = 'await_support';
+    await ctx.reply('حالة الناخب بالنسبة للمرشح:', Markup.inlineKeyboard([
+      Markup.button.callback('مؤيد', 'support_yes'),
+      Markup.button.callback('معارض', 'support_no'),
+      Markup.button.callback('محايد', 'support_neutral')
+    ]));
+    return;
+  }
+
+  // لو مفيش stage -> رسالة افتراضية
+  await ctx.reply('ابعت صورة البطاقة عشان نبدأ.');
+});
+
+// handlers لأزرار التأييد
+bot.action(/support_.+/, async (ctx) => {
+  try {
+    const choice = ctx.callbackQuery.data; // e.g. support_yes
+    const pending = (ctx.session && ctx.session.pending) || {};
+
+    // اجمع صف البيانات: [timestamp, nationalId, family, phone, support, lat, lon, driveLink, ocrText, reporterUserId]
+    const row = [
+      new Date().toISOString(),
+      pending.nationalId || '',
+      pending.family || '',
+      pending.phone || '',
+      choice.replace('support_',''),
+      pending.location ? pending.location.lat : '',
+      pending.location ? pending.location.lon : '',
+      pending.driveLink || '',
+      (pending.ocrText || '').slice(0,4000),
+      ctx.from.id
+    ];
+
+    await appendRow(row);
+
+    // تأكيد للمندوب
+    await ctx.editMessageReplyMarkup(); // תסיר inline buttons
+    await ctx.reply('تم تسجيل الناخب بنجاح. شكراً لمجهودك!');
+    // נקה הsession
+    ctx.session.pending = null;
+    ctx.session.stage = null;
+  } catch (e) {
+    console.error(e);
+    await ctx.reply('حصل خطأ أثناء حفظ البيانات. حاول تاني.');
+  }
+});
+
+bot.launch();
+console.log('Bot started');
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+ملاحظات مهمة على الكود:
+	•	GOOGLE_APPLICATION_CREDENTIALS لازم يشير لملف JSON لحساب الخدمة (Service Account) اللي عنده صلاحيات Sheets + Drive + Vision.  ￼
+	•	ALLOWED_USER_IDS هو الـUser IDs للمناديب المصرح لهم. تجيب الـuser id عن طريق ctx.from.id أو تطلب منهم يعملوا /start عشان يظهرلك رقمهم في اللوغ.  ￼
+	•	قد تحتاج تعديل regex لاستخراج الرقم القومي بناءً على تنسيق بطاقتك.
+	•	في uploadToDrive الكود يرفع الملف في مجلد محدد لو DRIVE_FOLDER_ID موجود.
+
+⸻
+
+3) خطوات الإعداد السريع
+	1.	أنشئ مشروع على Google Cloud Platform، فعّل APIs: Drive API, Sheets API, Cloud Vision API.  ￼
+	2.	أنشئ Service Account وامنحه صلاحيات الوصول للـ Sheets + Drive + Vision، ونزّل ملف JSON. خزنه على السيرفر.
+	3.	أنشئ Google Sheet جديد وخد SPREADSHEET_ID من الرابط. ضيف Sheet باسم Sheet1 أو عدّل الكود.  ￼
+	4.	(اختياري) على Drive اصنع مجلد و خُد الـDRIVE_FOLDER_ID لو عايز الصور في مجلد مخصص.  ￼
+	5.	فعّل بوت على BotFather وخد BOT_TOKEN. ضيف ALLOWED_USER_IDS فى ملف .env مفصولين بفواصل.
+	6.	ثبت الحزم ونشّط الخدمة على سيرفر Node.js (مثلاً pm2 أو systemd).
+
+⸻
+
+4) أمور فنية & تحسينات ممكنة لاحقًا
+	•	تحسين استخراج الحقول من OCR: استخدم خوارزميات تخصيص (parsing rules) بناءً على صور البطاقات الحقيقية (مثلاً أسماء الحقول بالترتيب).
+	•	التعامل مع حالات البطاقة المقلوبة/غير واضحة: اطلب صورة أوضح أو اطلب إعادة التقاط مع تعليمات (مثلاً: اضبط الإضاءة، اربط البطاقة بخلفية داكنة).
+	•	لإثبات سلامة البيانات: خزّن hash للصورة، وخزن من حلّل/سجل البيانات (UserID وtimestamp وGPS) لaudit trail.
+	•	واجهة داشبورد ويب: ممكن تضيف صفحة React/Bootstrap تقرأ الـSheet أو قاعدة بيانات (مثلاً Firestore أو PostgreSQL) لعرض التقارير والخرائط.
+
+⸻
+
+5) خصوصية وقانون
+	•	أنت تعمل في إطار سياسي/إنتخابي — لازم تتأكد من قوانين الخصوصية المحلية (حماية بيانات شخصية) قبل جمع أي بيانات شخصية (الرقم القومي، رقم التليفون، الموقع). سجّل موافقة صريحة من الناخب إن بياناته هتتجمع وتُخزن.
+	•	خزّن مفاتيح الـService Account بأمان، واستخدم قنوات آمنة (HTTPS) على السيرفر.
+	•	قلّل الصلاحيات: اعطِ الـService Account أقل صلاحيات ممكنة (principle of least privilege).
+
+⸻
+
+6) مصادر ومراجع (مفيدة للتطبيق)
+	•	توثيق Telegraf (لبناء بوتات Telegram).  ￼
+	•	Google Sheets API Quickstart (Node.js) — طريقة append للصفوف.  ￼
+	•	Google Drive API — كيفية رفع الملفات.  ￼
+	•	Google Cloud Vision OCR — كيفية استخراج النص من الصور.  ￼
+	•	كيفية الحصول على user_id من Telegram (ملاحظات عملية).  ￼
+
+⸻
+
+لو تحب أعمل لك أي حاجة من دول فورًا من غير تعب:
+	•	أجيّبلك مشروع جاهز (ZIP) فيه الكود اللي فوق مع README وضبط .env.
+	•	أو أعدل الكود علشان يتعامل مع صيغ بطاقات معينة عندك (تبعت صورة عينة وانا أضبط الـOCR parsing).
+	•	أو أبنيلك داشبورد ويب لعرض النتائج على خريطة (Map) وتصفية.
+
+اكتب “عايز المشروع جاهز” لو تحب أجهزه (هجهزلك الكود ومستند الإعداد والـ.env.example هنا).
