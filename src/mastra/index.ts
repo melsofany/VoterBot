@@ -9,8 +9,20 @@ import { z } from "zod";
 
 import { sharedPostgresStorage } from "./storage";
 import { inngest, inngestServe } from "./inngest";
-import { exampleWorkflow } from "./workflows/exampleWorkflow";
-import { exampleAgent } from "./agents/exampleAgent";
+import { voterDataWorkflow } from "./workflows/voterDataWorkflow";
+import { voterDataAgent } from "./agents/voterDataAgent";
+import { registerTelegramTrigger } from "../triggers/telegramTriggers";
+import { getSheetsClient } from "../services/google/clients";
+import { ocrTool } from "./tools/ocrTool";
+import { uploadToDriveTool } from "./tools/uploadToDriveTool";
+import { saveVoterDataTool } from "./tools/saveVoterDataTool";
+import { validatePhoneTool } from "./tools/validatePhoneTool";
+import { checkAuthorizedUserTool } from "./tools/checkAuthorizedUserTool";
+import { downloadTelegramPhotoTool } from "./tools/downloadTelegramPhotoTool";
+import { sendTelegramMessageTool } from "./tools/sendTelegramMessageTool";
+import { delegatesApi } from "../api/delegatesApi";
+import { readFile } from "fs/promises";
+import { join } from "path";
 
 class ProductionPinoLogger extends MastraLogger {
   protected logger: pino.Logger;
@@ -55,15 +67,21 @@ class ProductionPinoLogger extends MastraLogger {
 
 export const mastra = new Mastra({
   storage: sharedPostgresStorage,
-  // Register your workflows here
-  workflows: {},
-  // Register your agents here
-  agents: {},
+  workflows: { voterDataWorkflow },
+  agents: { voterDataAgent },
   mcpServers: {
     allTools: new MCPServer({
       name: "allTools",
       version: "1.0.0",
-      tools: {},
+      tools: {
+        ocrTool,
+        uploadToDriveTool,
+        saveVoterDataTool,
+        validatePhoneTool,
+        checkAuthorizedUserTool,
+        downloadTelegramPhotoTool,
+        sendTelegramMessageTool,
+      },
     }),
   },
   bundler: {
@@ -112,20 +130,79 @@ export const mastra = new Mastra({
       },
     ],
     apiRoutes: [
-      // This API route is used to register the Mastra workflow (inngest function) on the inngest server
       {
         path: "/api/inngest",
         method: "ALL",
         createHandler: async ({ mastra }) => inngestServe({ mastra, inngest }),
-        // The inngestServe function integrates Mastra workflows with Inngest by:
-        // 1. Creating Inngest functions for each workflow with unique IDs (workflow.${workflowId})
-        // 2. Setting up event handlers that:
-        //    - Generate unique run IDs for each workflow execution
-        //    - Create an InngestExecutionEngine to manage step execution
-        //    - Handle workflow state persistence and real-time updates
-        // 3. Establishing a publish-subscribe system for real-time monitoring
-        //    through the workflow:${workflowId}:${runId} channel
       },
+      {
+        path: "/dashboard",
+        method: "GET",
+        handler: async (c) => {
+          try {
+            const html = await readFile(join(process.cwd(), 'public', 'dashboard.html'), 'utf-8');
+            return c.html(html);
+          } catch (error) {
+            return c.text('Dashboard not found', 404);
+          }
+        },
+      },
+      {
+        path: "/api/dashboard/*",
+        method: "ALL",
+        handler: async (c) => {
+          return delegatesApi.fetch(c.req.raw, c.env);
+        },
+      },
+      ...registerTelegramTrigger({
+        triggerType: "telegram/message",
+        handler: async (mastra, triggerInfo) => {
+          const logger = mastra.getLogger();
+          logger?.info("📱 [Telegram Trigger] رسالة جديدة من Telegram");
+
+          const userId = String(triggerInfo.payload?.message?.from?.id || '');
+          const chatId = String(triggerInfo.payload?.message?.chat?.id || '');
+
+          try {
+            const sheets = await getSheetsClient();
+            const spreadsheetId = process.env.GOOGLE_SPREADSHEET_ID;
+
+            if (!spreadsheetId) {
+              throw new Error('GOOGLE_SPREADSHEET_ID not configured');
+            }
+
+            const response = await sheets.spreadsheets.values.get({
+              spreadsheetId,
+              range: 'المناديب!A:A',
+            });
+
+            const rows = response.data.values || [];
+            const authorizedUserIds = rows.flat().filter(id => id && id.trim());
+            const isAuthorized = authorizedUserIds.includes(userId);
+
+            if (!isAuthorized) {
+              logger?.warn("⛔ [Telegram Trigger] مستخدم غير مصرح له");
+              return;
+            }
+
+            logger?.info("✅ [Telegram Trigger] مستخدم مصرح له، بدء معالجة");
+
+            const telegramPayload = JSON.stringify(triggerInfo.payload);
+
+            const run = await mastra.getWorkflow("voter-data-workflow").createRunAsync();
+            await run.start({
+              inputData: {
+                telegramPayload,
+                threadId: `telegram/${chatId}`,
+              },
+            });
+
+            logger?.info("🚀 [Telegram Trigger] تم بدء Workflow");
+          } catch (error: any) {
+            logger?.error("❌ [Telegram Trigger] خطأ في معالجة الرسالة");
+          }
+        },
+      }),
     ],
   },
   logger:
