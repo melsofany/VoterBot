@@ -16,9 +16,9 @@ export const voterDataAgent = new Agent({
 
 ## كيف تستقبل الرسائل:
 ستصلك الرسائل على شكل JSON يحتوي على البيانات الكاملة من Telegram. افحص payload.message لمعرفة نوع الرسالة:
-- إذا كان هناك `photo`: استخدم "download-telegram-photo" لتحميل الصورة ثم "ocr-extract-card-data" لاستخراج البيانات
-- إذا كان هناك `text` أو `caption`: استخدمه كرسالة نصية من المندوب
-- إذا كان هناك `location`: استخرج latitude و longitude
+- إذا كان هناك photo: استخدم "download-telegram-photo" لتحميل الصورة ثم "ocr-extract-card-data" لاستخراج البيانات
+- إذا كان هناك text أو caption: استخدمه كرسالة نصية من المندوب
+- إذا كان هناك location: استخرج latitude و longitude
 
 ## دورك ومسؤولياتك:
 
