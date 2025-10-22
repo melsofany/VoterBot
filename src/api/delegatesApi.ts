@@ -171,23 +171,23 @@ delegatesApi.delete('/delegates/:userId', async (c) => {
 
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: 'المناديب!A:A',
+      range: 'المناديب!A:B',
     });
 
     const rows = response.data.values || [];
-    const delegates = rows.map(row => row[0]).filter(id => id && id.trim());
+    const delegates = rows.map(row => ({ userId: row[0] || '', name: row[1] || '' })).filter(d => d.userId.trim());
 
-    const indexToDelete = delegates.findIndex(id => id === userId.trim());
+    const indexToDelete = delegates.findIndex(d => d.userId === userId.trim());
 
     if (indexToDelete === -1) {
       return c.json({ error: 'User ID غير موجود' }, 404);
     }
 
-    const updatedDelegates = delegates.filter(id => id !== userId.trim());
+    const updatedDelegates = delegates.filter(d => d.userId !== userId.trim());
 
     await sheets.spreadsheets.values.clear({
       spreadsheetId,
-      range: 'المناديب!A:A',
+      range: 'المناديب!A:B',
     });
 
     if (updatedDelegates.length > 0) {
@@ -196,7 +196,7 @@ delegatesApi.delete('/delegates/:userId', async (c) => {
         range: 'المناديب!A1',
         valueInputOption: 'RAW',
         requestBody: {
-          values: updatedDelegates.map(id => [id]),
+          values: updatedDelegates.map(d => [d.userId, d.name]),
         },
       });
     }
