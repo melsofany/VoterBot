@@ -2,6 +2,7 @@ import { getSheetsClient } from "../services/google/clients";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { setCookie, getCookie, deleteCookie } from "hono/cookie";
+import { randomBytes } from "crypto";
 
 export const delegatesApi = new Hono();
 
@@ -11,7 +12,7 @@ const sessions = new Map<string, { username: string; createdAt: number }>();
 const SESSION_TIMEOUT = 24 * 60 * 60 * 1000;
 
 function generateSessionToken(): string {
-  return Math.random().toString(36).substring(2) + Date.now().toString(36);
+  return randomBytes(32).toString('hex');
 }
 
 function createSession(username: string): string {
@@ -42,13 +43,19 @@ function requireAuth(c: any, next: () => Promise<void>) {
 delegatesApi.post('/login', async (c) => {
   try {
     const { username, password } = await c.req.json();
-    const adminUsername = process.env.DASHBOARD_USERNAME || 'admin';
-    const adminPassword = process.env.DASHBOARD_PASSWORD || 'admin123';
+    const adminUsername = process.env.DASHBOARD_USERNAME;
+    const adminPassword = process.env.DASHBOARD_PASSWORD;
+    
+    if (!adminUsername || !adminPassword) {
+      return c.json({ error: 'النظام غير مهيأ بشكل صحيح' }, 500);
+    }
     
     if (username === adminUsername && password === adminPassword) {
       const token = createSession(username);
       setCookie(c, 'session_token', token, {
         httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'Strict',
         maxAge: SESSION_TIMEOUT / 1000,
         path: '/',
       });

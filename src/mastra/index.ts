@@ -140,10 +140,15 @@ export const mastra = new Mastra({
         method: "GET",
         handler: async (c) => {
           try {
-            const html = await readFile(join(process.cwd(), 'public', 'dashboard.html'), 'utf-8');
+            let html;
+            try {
+              html = await readFile(join(process.cwd(), 'public', 'dashboard.html'), 'utf-8');
+            } catch {
+              html = await readFile(join(__dirname, '..', '..', 'public', 'dashboard.html'), 'utf-8');
+            }
             return c.html(html);
           } catch (error) {
-            return c.text('Dashboard not found', 404);
+            return c.text(`Dashboard not found. CWD: ${process.cwd()}, __dirname: ${__dirname}`, 404);
           }
         },
       },

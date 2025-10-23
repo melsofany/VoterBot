@@ -11,10 +11,10 @@ export async function getGoogleAuth() {
     return authClient;
   }
 
-  const credentialsJson = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+  const credentialsJson = process.env.GOOGLE_SERVICE_ACCOUNT_KEY || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
   
   if (!credentialsJson) {
-    throw new Error('GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable is not set');
+    throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY environment variable is not set');
   }
 
   const credentials = JSON.parse(credentialsJson);
@@ -56,10 +56,10 @@ export async function getVisionClient() {
     return visionClient;
   }
 
-  const credentialsJson = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+  const credentialsJson = process.env.GOOGLE_SERVICE_ACCOUNT_KEY || process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
   
   if (!credentialsJson) {
-    throw new Error('GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable is not set');
+    throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY environment variable is not set');
   }
 
   const credentials = JSON.parse(credentialsJson);
