@@ -21,6 +21,7 @@ import { checkAuthorizedUserTool } from "./tools/checkAuthorizedUserTool";
 import { downloadTelegramPhotoTool } from "./tools/downloadTelegramPhotoTool";
 import { sendTelegramMessageTool } from "./tools/sendTelegramMessageTool";
 import { delegatesApi } from "../api/delegatesApi";
+import { setupApi } from "../api/setupApi";
 import { readFile } from "fs/promises";
 import { join } from "path";
 
@@ -157,6 +158,13 @@ export const mastra = new Mastra({
         method: "ALL",
         handler: async (c) => {
           return delegatesApi.fetch(c.req.raw, c.env);
+        },
+      },
+      {
+        path: "/api/setup/*",
+        method: "ALL",
+        handler: async (c) => {
+          return setupApi.fetch(c.req.raw, c.env);
         },
       },
       ...registerTelegramTrigger({
