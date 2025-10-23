@@ -4,7 +4,7 @@ import { cors } from "hono/cors";
 import { setCookie, getCookie, deleteCookie } from "hono/cookie";
 import { randomBytes } from "crypto";
 
-export const delegatesApi = new Hono();
+export const delegatesApi = new Hono().basePath('/api/dashboard');
 
 delegatesApi.use('/*', cors());
 
